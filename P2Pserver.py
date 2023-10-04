@@ -2,7 +2,7 @@ import socket
 import threading
 import json
 import binascii  # for converting hex to bytes
-
+import hashlib
 
 # The class describes the P2P server
 class P2PServer:
@@ -18,14 +18,16 @@ class P2PServer:
     self.peers = {}
     self.peer_counter = 0
 
-  # register a peer to the list 
  # register a peer to the list
   def register_peer(self, address, listening_port) -> int:
       print(f"Registering peer address: {address}, listening port: {listening_port}")
       combined_address = (address[0], listening_port)  # Combine IP and listening port
       
-      existing_peer_id = [peer_id for peer_id, data in self.peers.items() if data['addr'] =afa combined_address]
-      
+      existing_peer_id = None
+      for peer_id, data in self.peers.items():
+        if data['addr'] == combined_address:
+          existing_peer_id = peer_id
+
       if existing_peer_id:
           print(f"[Warning]: Peer already exists, ID {existing_peer_id[0]}")
           return existing_peer_id[0]
@@ -43,7 +45,7 @@ class P2PServer:
     try:
       print(addr, self.peers)
       existing_peer_id = [peer_id for peer_id, data in self.peers.items() if data['addr'] == addr]
-      peer_id = -1;
+      peer_id = -1
       if existing_peer_id:
         peer_id = existing_peer_id[0]
       else:
@@ -80,6 +82,7 @@ class P2PServer:
           chunk_id = command['chunk_id']
           chunk_data_hex = command['chunk_data']
           
+          
           # Convert the hex data back to bytes
           chunk_data_bytes = binascii.unhexlify(chunk_data_hex)
           
@@ -91,21 +94,42 @@ class P2PServer:
             if filename not in self.peers[peer_id]['files']:
               self.peers[peer_id]['files'][filename] = {
                 'chunks': {},
-                'total_chunks': 0  # Initialize total_chunks for this file
+                'total_chunks': 0,  # Initialize total_chunks for this file
               }
 
-            self.peers[peer_id]['files'][filename]['chunks'][chunk_id] = chunk_data_bytes
+            self.peers[peer_id]['files'][filename]['chunks'][chunk_id] = (chunk_data_bytes)
+
             self.peers[peer_id]['files'][filename]['total_chunks'] = max(
               self.peers[peer_id]['files'][filename]['total_chunks'], chunk_id
             )  # Update total_chunks
-          
+
+
+        elif cmd_type == "register_file_hash":
+          filename = command['filename']
+          hash = command['hash']
+          self.peers[peer_id]['files'][filename]['hash'] = hash
+
+        elif cmd_type == "request_file_hash":
+          filename = command['filename']
+          for peer in self.peers:
+            if filename in self.peers[peer]['files']:
+              hash_info = {
+                'hash': self.peers[peer]['files'][filename]['hash']
+              }
+              peer_socket.send(json.dumps(hash_info).encode())
+              break
+
+
         elif cmd_type == "request_file_list":
           # Send only the filenames and the total number of chunks for each file, not the actual chunk data
-          file_list = {
-            peer: {filename: {'total_chunks': len(chunks)} for filename, chunks in data['files'].items()}
-            for peer, data in self.peers.items()
-          }
+          file_list = {}
+
+          for peer in self.peers:
+            for filename in self.peers[peer]['files']:
+              file_list[filename]={'total_chunks': self.peers[peer]['files'][filename]['total_chunks']}
+              
           peer_socket.send(json.dumps(file_list).encode())
+
 
         elif cmd_type == "request_file_info":
           cmd_filename = command['filename']
@@ -141,11 +165,18 @@ class P2PServer:
               if 'files' not in self.peers[peer_id]:
                 self.peers[peer_id]['files'] = {}
               if filename not in self.peers[peer_id]['files']:
-                self.peers[peer_id]['files'][filename] = []
-              self.peers[peer_id]['files'][filename][chunk_id] = None
+                self.peers[peer_id]['files'][filename] = {
+                  'chunks': {},
+                  'total_chunks': 0
+                }
+
+              self.peers[peer_id]['files'][filename]['chunks'][chunk_id] = None
+              self.peers[peer_id]['files'][filename]['total_chunks'] += 1
+
               print(f"Updated server record for peer {peer_id}, filename {filename}, chunk {chunk_id}")
           else:
               print(f"Peer ID {peer_id} not found. Cannot update chunk information.")
+
 
     except Exception as e:
       print(f"An error occurred while handling peer {peer_id}: {e}")

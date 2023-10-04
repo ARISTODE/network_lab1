@@ -3,6 +3,8 @@ import threading
 import json
 import os
 import binascii
+import hashlib
+import time
 
 class P2PClient:
   def __init__(self, server_host, server_port) -> None:
@@ -36,10 +38,14 @@ class P2PClient:
     filename = os.path.basename(filepath)
     chunk_dict = {}  # Initialize an empty dictionary to store chunk IDs and their data
     try:
+      h = hashlib.sha1()
       with open(filepath, 'rb') as f:
           chunk_id = 1
+         
           while True:
+            
             chunk_data = f.read(self.CHUNK_SIZE)
+            h.update(chunk_data)
             if not chunk_data:
                 break
 
@@ -51,15 +57,23 @@ class P2PClient:
                 'type': 'register_file_chunk',
                 'filename': filename,
                 'chunk_id': chunk_id,
-                'chunk_data': chunk_hex
+                'chunk_data': chunk_hex,
             })
 
             # Send the message to the server
             self.client.send(message.encode())
-
+            time.sleep(0.5)
             # Store the chunk locally (if needed)
             chunk_dict[chunk_id] = chunk_hex  # Store the hex data along with its ID in the dictionary
             chunk_id += 1
+
+      #TODO: send hash of file to server
+      message = json.dumps({
+        'type': 'register_file_hash',
+        'filename': filename,
+        'hash': h.hexdigest()
+      })
+      self.client.send(message.encode())
 
       self.files[filename] = chunk_dict
       print(f"Successfully registered file {filename} with {len(chunk_dict)} chunks.")
@@ -87,29 +101,49 @@ class P2PClient:
     peer_info = self.request_file_info(filename)
     print(f"Peer info for {filename}: {peer_info}")
 
-    # Determine which chunks are missing
+    # Determine which chunks are missing, and find their frequencies
     missing_chunks = set()
     total_chunks = 0
+    
+    chunk_id_counts = {}
+
     for peer_data in peer_info.values():
       missing_chunks.update(peer_data['chunks'])
       total_chunks = max(total_chunks, peer_data['total_chunks'])  # Update the total number of chunks
-    
+      for chunk_id in peer_data['chunks']:
+        if chunk_id in chunk_id_counts.keys():
+          chunk_id_counts[chunk_id] += 1
+        else:
+          chunk_id_counts[chunk_id] = 1
+
+    #sort chunks by frequency
+    {k: v for k, v in sorted(chunk_id_counts.items(), key=lambda item: item[1])}
+
     # Remove chunks that we already have
     if filename in self.files:
       existing_chunks = set(self.files[filename].keys())
       missing_chunks.difference_update(existing_chunks)
 
     # Download missing chunks from available peers
-    if missing_chunks:
+    while missing_chunks:
+      print(f"missing chunks: {missing_chunks}")
       for peer_id, peer_data in peer_info.items():
           available_chunks = missing_chunks.intersection(set(peer_data['chunks']))
           if available_chunks:
             peer_address = self.request_peer_address(peer_id)
             if not peer_address:
               print(f"Cannot find peer address {peer_id}")
-            else:
-              print(f"Start downloading from peer {peer_address}", available_chunks)
-              download_thread = threading.Thread(target=self.download_from_peer, args=(peer_address, filename, available_chunks))
+            else:              
+              #sort chunks by frequency
+              rarest_chunk_id = None
+              for cchunk_id in chunk_id_counts:
+                for achunk_id in available_chunks:
+                  if achunk_id == cchunk_id:
+                    rarest_chunk_id = cchunk_id
+
+              
+              download_thread = threading.Thread(target=self.download_from_peer, args=(peer_address, filename, rarest_chunk_id))
+              missing_chunks.remove(rarest_chunk_id)
               download_thread.start()
               download_thread.join()
 
@@ -132,6 +166,23 @@ class P2PClient:
 
     # Reassemble the file
     file_data = b''.join(chunk for chunk in sorted_chunks)  # Assuming chunks are stored as bytes
+
+    #check hash
+    if (True):
+      h = hashlib.sha1()
+      h.update(file_data)
+
+      message = json.dumps({
+        'type': 'request_file_hash',
+        'filename': filename
+      })
+      self.client.send(message.encode())
+      response_data = self.client.recv(1024).decode()      
+      response = json.loads(response_data)
+      if h.hexdigest() != response['hash']:
+        print("Hashes do match")
+        return
+
 
     # Write to output file
     output_filepath = os.path.join("clientFiles", f"downloaded_{filename}")
@@ -163,9 +214,9 @@ class P2PClient:
           print(f"Could not retrieve address for peer {peer_id}")
           return None  
 
-  # download chunks from peers 
-  def download_from_peer(self, peer_address, filename, chunks):
-    # Connect to a peer and download specified chunks
+  # download chunk from peer 
+  def download_from_peer(self, peer_address, filename, chunk_id):
+    # Connect to a peer and download specified chunk
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as peer_socket:
       try:
         peer_socket.connect(tuple(peer_address))
@@ -173,27 +224,31 @@ class P2PClient:
         print(f"Could not connect to peer at {peer_address}")
         return
 
-      for chunk_id in chunks:
-        message = json.dumps({'type': 'request_chunk', 'filename': filename, 'chunk_id': chunk_id})
-        peer_socket.send(message.encode())
+      print(f"Start downloading from peer {peer_address}", chunk_id)
+      message = json.dumps({'type': 'request_chunk', 'filename': filename, 'chunk_id': chunk_id})
+      peer_socket.send(message.encode())
 
-        # Receive the chunk from the peer
-        chunk_data = peer_socket.recv(1024).decode()
-        command = json.loads(chunk_data)
-        if command['type'] == 'send_chunk':
-            received_chunk_hex = command['chunk_data']
+      # Receive the chunk from the peer
+      chunk_data = peer_socket.recv(1024).decode()
+      command = json.loads(chunk_data)
+      if command['type'] == 'send_chunk':
+          received_chunk_hex = command['chunk_data']
 
-            # Convert hex to bytes
-            received_chunk_bytes = bytes.fromhex(received_chunk_hex)
+          # Convert hex to bytes
+          received_chunk_bytes = bytes.fromhex(received_chunk_hex)
 
-            # Store and process the received chunk
-            if filename not in self.files:
-                self.files[filename] = {}
-            print(f"store chunk {chunk_id} for file {filename}")
-            self.files[filename][chunk_id] = received_chunk_bytes
+          print(received_chunk_bytes)
+          # Store and process the received chunk
+          if filename not in self.files:
+              self.files[filename] = {}
+          print(f"store chunk {chunk_id} for file {filename}")
+          self.files[filename][chunk_id] = received_chunk_bytes
 
-            # Notify the server that we have a new chunk
-            self.notify_server_new_chunk(filename, chunk_id)
+          print(f"Finished downloading from peer {peer_address}", chunk_id)
+          
+          # Notify the server that we have a new chunk
+          self.notify_server_new_chunk(filename, chunk_id)
+
   
   #  notify server we have a new chunk
   def notify_server_new_chunk(self, filename, chunk_id):
@@ -283,7 +338,7 @@ class P2PClient:
 
       elif choice == '5':
           print("Exiting...")
-          break
+          exit()
           
       else:
           print("Invalid choice. Please try again.")
