@@ -5,6 +5,7 @@ import os
 import binascii
 import hashlib
 import time
+import base64
 
 class P2PClient:
   def __init__(self, server_host, server_port) -> None:
@@ -49,25 +50,23 @@ class P2PClient:
             if not chunk_data:
                 break
 
-            # Convert binary data to a hex string for JSON serialization
-            chunk_hex = chunk_data.hex()
-
             # Prepare the message for this chunk
             message = json.dumps({
                 'type': 'register_file_chunk',
                 'filename': filename,
                 'chunk_id': chunk_id,
-                'chunk_data': chunk_hex,
             })
 
             # Send the message to the server
             self.client.send(message.encode())
-            time.sleep(0.5)
             # Store the chunk locally (if needed)
-            chunk_dict[chunk_id] = chunk_hex  # Store the hex data along with its ID in the dictionary
+            chunk_dict[chunk_id] = chunk_data  # Store the data along with its ID in the dictionary
             chunk_id += 1
 
-      #TODO: send hash of file to server
+            if chunk_id % 10 == 0:
+              time.sleep(0.1)
+
+      #end hash of file to server
       message = json.dumps({
         'type': 'register_file_hash',
         'filename': filename,
@@ -94,11 +93,19 @@ class P2PClient:
     # Request information about which peers have chunks of a specific file
     message = json.dumps({'type': 'request_file_info', 'filename': filename})
     self.client.send(message.encode())
-    response = self.client.recv(1024).decode()
+    response = ""
+    while True:
+        chunk = self.client.recv(1024).decode()
+        response += chunk
+        if chunk.endswith("}}"):
+            break  # No more data to receive
+    
+    print(response)
     return json.loads(response)
   
   def download_file(self, filename):
     peer_info = self.request_file_info(filename)
+    print(peer_info)
     print(f"Peer info for {filename}: {peer_info}")
 
     # Determine which chunks are missing, and find their frequencies
@@ -126,7 +133,6 @@ class P2PClient:
 
     # Download missing chunks from available peers
     while missing_chunks:
-      print(f"missing chunks: {missing_chunks}")
       for peer_id, peer_data in peer_info.items():
           available_chunks = missing_chunks.intersection(set(peer_data['chunks']))
           if available_chunks:
@@ -229,15 +235,16 @@ class P2PClient:
       peer_socket.send(message.encode())
 
       # Receive the chunk from the peer
-      chunk_data = peer_socket.recv(1024).decode()
+      chunk_data = peer_socket.recv(2048).decode()
+
+  
       command = json.loads(chunk_data)
       if command['type'] == 'send_chunk':
           received_chunk_hex = command['chunk_data']
 
           # Convert hex to bytes
-          received_chunk_bytes = bytes.fromhex(received_chunk_hex)
+          received_chunk_bytes = base64.b64decode(received_chunk_hex)
 
-          print(received_chunk_bytes)
           # Store and process the received chunk
           if filename not in self.files:
               self.files[filename] = {}
@@ -283,7 +290,8 @@ class P2PClient:
 
             # Assume self.files contains a mapping from filenames to a list of chunks (or chunk data)
           if filename in self.files and chunk_id in self.files[filename]:
-            chunk_data = self.files[filename][chunk_id]  # Replace with actual chunk data
+            chunk_bytes = self.files[filename][chunk_id]  # Replace with actual chunk data
+            chunk_data = base64.b64encode(chunk_bytes).decode('utf-8')
 
             response = json.dumps({
                 'type': 'send_chunk',
@@ -291,6 +299,7 @@ class P2PClient:
                 'chunk_id': chunk_id,
                 'chunk_data': chunk_data
             })
+
             print(f"sending chunk {chunk_id}")
             peer_socket.send(response.encode())
           else:
@@ -322,8 +331,6 @@ class P2PClient:
           
       elif choice == '3':
         filename = input("Enter the filename to download: ")
-        peer_info = self.request_file_info(filename)
-        print(f"Peer info for {filename}: {peer_info}")
         self.download_file(filename)
 
       elif choice == '4':
