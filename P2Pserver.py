@@ -67,7 +67,14 @@ class P2PServer:
       while True:
         # receive command in JSON format
         print("Waiting to receive message...")
-        msg = peer_socket.recv(1024).decode()
+        msg = ""
+        while True:
+            chunk = peer_socket.recv(1024).decode()
+            print(chunk)
+            msg += chunk
+            if chunk.endswith("}"):
+                break  # No more data to receive
+            
         print(f"Received raw message: {msg}")
         if not msg:
           print("Message is empty, breaking out of loop.")

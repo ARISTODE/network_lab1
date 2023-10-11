@@ -63,8 +63,8 @@ class P2PClient:
             chunk_dict[chunk_id] = chunk_data  # Store the data along with its ID in the dictionary
             chunk_id += 1
 
-            if chunk_id % 10 == 0:
-              time.sleep(0.1)
+            # if chunk_id % 10 == 0:
+            #   time.sleep(0.1)
 
       #end hash of file to server
       message = json.dumps({
